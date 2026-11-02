@@ -1,0 +1,324 @@
+// mediagent MVP 資料模型
+// 來源：docs/requirements.md 第 4 節（資料）、第 6 節（商業規則）
+// 型別限制：int, long, float, bool, string；日期時間以 string 表示
+// 日期時間慣例：
+//   - 一律以 UTC 儲存，格式為帶時區的 ISO 8601（例如 2026-10-06T04:00:00Z）
+//   - 使用者輸入與畫面顯示一律為台灣時間（UTC+8），例如 2026-10-06 12:00
+//   - 排程時間、目前時間、授權到期時間的比較一律以 UTC 進行
+//   - API 傳輸使用帶時區的 ISO 8601
+//   - spec/features 中的時間字串（如 "2026-10-06 12:00"）皆為台灣時間
+
+Table user_account {
+  id long [pk, note: '使用者帳號識別碼']
+  email string [unique, not null, note: '登入帳號；儲存前先移除前後空白並轉為小寫（標準化）；以標準化後的值設唯一性限制，不可與其他帳號重複（需求 4.1）']
+  name string [not null, note: '顯示名稱']
+  password_hash string [not null, note: '登入密碼經安全雜湊處理後的值；系統只保存雜湊值，不保存明文。初始密碼不可為空且至少 8 個字元，允許英文字母、數字及常見特殊符號，不強制特定組合（需求 4.1、NFR-07）']
+  role string [not null, note: '角色；值為「管理員」「發佈者」「撰稿者」三者之一（需求 4.1）']
+  status string [not null, note: '狀態；值為「啟用」「停用」之一；停用的帳號不刪除；管理員可將停用的帳號重新啟用（需求 4.1）']
+  failed_login_count int [not null, default: 0, note: '連續登入失敗次數；登入成功或管理員解除鎖定時歸零']
+  locked_until string [null, note: '鎖定到期時間（日期時間）：連續登入失敗達 5 次時設為當下時間加 15 分鐘；在此時間之前無法登入，到達此時間即解除；管理員可手動解除鎖定，解除後為空；未鎖定時為空']
+
+  Note: '''
+  社團幹部在系統中的帳號，由管理員建立（需求 4.1、FR-02）。
+  關聯：
+  - user_account 1:N post（建立者）
+  - user_account 1:N platform_account（連結者）
+  - user_account 1:N audit_log（操作者）
+  跨屬性／跨資料不變條件：
+  - 系統中至少保留 1 個 role = 管理員 且 status = 啟用 的帳號（BR-19）
+  - status = 停用 的帳號無法登入，也無法執行任何操作（BR-20、NFR-07）
+  - 帳號停用後，其建立的貼文、發佈紀錄與稽核紀錄保留（BR-20）
+  - 狀態轉換：啟用 → 停用（停用帳號）；停用 → 啟用（啟用帳號）；重新啟用時 email、name、role 維持原值
+  '''
+}
+
+Table platform_account {
+  id long [pk, note: '平台帳號識別碼']
+  platform string [not null, note: '平台；值為「Threads」「Instagram」「Discord」三者之一（需求 4.2）']
+  platform_user_id string [null, note: '平台帳號識別碼：Threads、Instagram 由平台授權回傳的穩定唯一識別碼，重新連結時以此比對是否為同一帳號；相同時帳號名稱更新為平台回傳的名稱，若新名稱與同平台其他未移除帳號重複則拒絕']
+  account_name string [not null, note: '帳號名稱；Threads、Instagram 為平台上的帳號名稱，以平台授權回傳為準；Discord 為頻道名稱，由管理員輸入（需求 4.2）']
+  auth_status string [not null, note: '授權狀態；值為「有效」「失效」之一（需求 4.2）。變為失效：目前時間超過授權到期時間，或發佈時平台明確回應授權失效（例如存取 Token 被撤銷）；網路錯誤、平台暫時故障等一般發佈失敗不改變授權狀態。重新連結成功後恢復為有效']
+  auth_expires_at string [null, note: '授權到期時間（日期時間）；Threads、Instagram 以平台授權回傳為準，平台未提供明確到期時間時為空（未知）；Discord 沒有到期時間，為空（不適用）；不由管理員填寫（需求 4.2）']
+  credential_encrypted string [not null, note: '存取憑證，加密保存；Threads、Instagram 為透過平台授權流程取得的存取 Token，Discord 為管理員貼上的 Webhook 網址；不得出現在任何 API 回應或 Log 中，介面、日誌與錯誤訊息皆不得完整曝光 Token 或 Webhook 網址，幹部無法取得；Discord Webhook 網址須經 Discord 驗證存在且可使用才保存（需求 4.2、BR-21、NFR-02）']
+  linked_by long [not null, note: '連結者：連結此平台帳號的管理員（user_account.id）；重新連結時不變，重新連結的管理員記錄於稽核紀錄']
+  removed bool [not null, default: false, note: '是否已移除；管理員移除平台帳號時不刪除資料，改標記為已移除']
+
+  Note: '''
+  社團連結到系統的社群平台帳號（需求 4.2）。
+  授權到期後由管理員重新連結：更新同一筆平台帳號的 credential_encrypted 與 auth_expires_at，auth_status 改回有效；選擇它為目標平台帳號的貼文與既有發佈紀錄沿用。
+  移除平台帳號時不刪除資料，標記 removed = true；已移除的平台帳號不出現在已連結的平台帳號列表、不能被選為目標平台帳號，其發佈紀錄與稽核紀錄保留並可對應。
+  關聯：
+  - user_account 1:N platform_account（連結者）
+  - platform_account 1:N post_target（被選為目標平台帳號）
+  - platform_account 1:N publish_record
+  跨屬性不變條件：
+  - platform = Discord 時，auth_expires_at 為空（需求 4.2）
+  - 在 removed = false 的平台帳號中，(platform, account_name) 不可重複；已移除的平台帳號可再連結成新的一筆，舊的一筆保留
+  - auth_expires_at 早於目前時間時，授權狀態視為「失效」（BR-09）；auth_expires_at 為空時不因時間而失效
+  - 發佈時平台明確回應授權失效，auth_status 改為「失效」；一般發佈失敗不改變 auth_status
+  - 幹部帳號異動不影響已連結的平台帳號（BR-21）
+  '''
+}
+
+Table post {
+  id long [pk, note: '貼文識別碼']
+  content string [not null, note: '貼文文字；不可為空白（BR-01）；長度不可超過所選目標平台中最嚴格的字數上限（BR-02）；字數依各平台官方定義分別計算（換行、中文字、emoji、組合 emoji 的算法以平台 API 文件為準，不明確時以實際 API 驗證結果確認）']
+  status string [not null, note: '貼文狀態；值為 DRAFT（草稿）、SCHEDULED（已排程）、PUBLISHING（發佈中）、PUBLISHED（發佈完成）、PARTIALLY_FAILED（部分失敗）、FAILED（全部失敗）之一；建立後初始為 DRAFT（需求 4.6）']
+  scheduled_at string [null, note: '排程時間（日期時間）：預定發佈時間；未設定排程時為空（需求 4.3）；設定時必須晚於目前時間（BR-10）；以 5 分鐘為單位，分鐘數為 5 的倍數、秒數為 0']
+  creator_id long [not null, note: '建立者：建立此貼文的使用者（user_account.id）']
+  publishing_started_at string [null, note: '進入發佈中的時間（日期時間）：立即發佈、排程發佈或重試受理時記錄；用於判斷發佈任務是否超過 10 分鐘恢復門檻']
+  created_at string [not null, note: '建立時間（日期時間）：貼文建立時由系統自動產生，使用者不可修改；貼文列表預設依此由新到舊排序，相同時依 id 由大到小']
+  scheduled_by long [null, note: '排程設定者：最後一次成功設定排程的使用者（user_account.id）；從未設定排程時為空']
+
+  Note: '''
+  一則要發佈到一個或多個平台帳號的公告（需求 4.3）。
+  關聯：
+  - user_account 1:N post（建立者）
+  - post 1:0..1 post_image（最多一張圖片，BR-03）
+  - post M:N platform_account，經由 post_target（目標平台帳號）
+  - post 1:N publish_record
+  跨屬性／跨資料不變條件：
+  - 未設定排程時 scheduled_at 為空（需求 4.3）；取消排程或立即發佈已排程的貼文後，scheduled_at 清空
+  - content 長度 ≤ 所選目標平台中最嚴格的文字上限：Threads 500、Instagram 2,200、Discord 2,000 字元（BR-02、需求 4.7）
+  - 選擇 Instagram 平台帳號為目標時，必須附加圖片（BR-05）
+  - 狀態轉換只能為：DRAFT→SCHEDULED；SCHEDULED→DRAFT；DRAFT/SCHEDULED→PUBLISHING；PUBLISHING→PUBLISHED/PARTIALLY_FAILED/FAILED；PARTIALLY_FAILED/FAILED→PUBLISHING（BR-12）
+  - 只有 DRAFT 與 SCHEDULED 的貼文可以修改或刪除（BR-13）
+  - 刪除貼文時實際刪除貼文主資料、目標平台帳號選擇、貼文圖片；發佈紀錄、變更歷程、稽核紀錄保留原貼文 ID；圖片檔案不再被引用時刪除實體檔案；刪除已排程貼文時，其待發佈紀錄改為已取消並寫入變更歷程，原因「刪除貼文」
+  - 已排程貼文因平台帳號被移除而沒有任何目標時，自動改回 DRAFT、scheduled_at 清空、原排程任務取消；內容、圖片、建立者等其餘資料保留；須以交易或併發控制確保改回草稿後不會再被舊的排程任務發佈
+  - 所有目標平台帳號的發佈紀錄皆成功時 status = PUBLISHED；部分成功為 PARTIALLY_FAILED；全部失敗為 FAILED（BR-15）
+  '''
+}
+
+Table post_image {
+  id long [pk, note: '貼文圖片識別碼']
+  post_id long [unique, not null, note: '所屬貼文（post.id）；每則貼文最多一張圖片（BR-03）']
+  format string [not null, note: '檔案格式；必須為 JPEG（需求 4.3.1、BR-04）']
+  size_bytes long [not null, note: '檔案大小，單位為位元組；不可超過 8 MB，即 8,000,000 位元組（1 MB = 1,000,000 位元組）（BR-04）']
+  width int [not null, note: '原圖寬度，單位為像素；須符合所有目標平台各自的尺寸限制，數值待查證官方規格']
+  height int [not null, note: '原圖高度，單位為像素；須符合所有目標平台各自的尺寸限制，數值待查證官方規格']
+  public_url string [not null, note: '原圖的公開網址，Threads 與 Discord 使用（需求 4.3.1）']
+  ig_public_url string [not null, note: 'Instagram 版本的公開網址（需求 4.3.1）']
+  ig_width int [not null, note: 'Instagram 版本寬度，單位為像素']
+  ig_height int [not null, note: 'Instagram 版本高度，單位為像素']
+
+  Note: '''
+  貼文附加的圖片（需求 4.3.1）。
+  關聯：post 1:0..1 post_image
+  跨屬性不變條件：
+  - 0.8 ≤ width / height ≤ 1.91（4:5 至 1.91:1，包含兩端）時，Instagram 版本與原圖相同（ig_public_url = public_url、ig_width = width、ig_height = height）（需求 4.3.1）
+  - width / height < 0.8（比 4:5 更高）時，Instagram 版本為從圖片中間裁切出的 4:5（BR-06）
+  - width / height > 1.91（比 1.91:1 更寬）時，Instagram 版本為從圖片中間裁切出的 1.91:1（BR-06）
+  - 裁切只調整被裁的那一邊（過高調 ig_height、過寬調 ig_width），另一邊維持原圖尺寸；被裁邊長先四捨五入，若 ig_width / ig_height 超出 0.8～1.91，每次減 1 像素重新檢查直到符合
+  '''
+}
+
+Table post_target {
+  post_id long [not null, note: '貼文（post.id）']
+  platform_account_id long [not null, note: '被選為目標的平台帳號（platform_account.id）；必須是已連結且授權狀態為有效的平台帳號（BR-08）']
+
+  indexes {
+    (post_id, platform_account_id) [pk, note: '同一則貼文不可重複選擇同一個平台帳號（需求 4.3）']
+    platform_account_id [note: '依目標平台帳號反查受影響貼文（外鍵索引）']
+  }
+
+  Note: '''
+  貼文的目標平台帳號（需求 4.3、FR-10）。
+  關聯：post M:N platform_account
+  不變條件：
+  - 發佈或設定排程前，貼文必須至少選擇 1 個目標平台帳號（BR-07）
+  '''
+}
+
+Table publish_record {
+  id long [pk, note: '發佈紀錄識別碼']
+  post_id long [not null, note: '所屬的貼文（post.id）；貼文刪除後仍保留原貼文 ID 作為歷史參照']
+  platform_account_id long [not null, note: '發佈到的平台帳號（platform_account.id）']
+  content_summary string [null, note: '發佈內容：該平台帳號當次實際發佈的完整文字內容，於實際執行發佈（含重試）時保存；尚未實際發佈（待發佈、已取消）時為空；貼文刪除後仍可追溯']
+  image_sha256 string [null, note: '發佈圖片的檔案雜湊值（SHA-256）：當次實際送出的圖片；無圖片或尚未實際發佈時為空；不保存圖片檔案本身']
+  image_format string [null, note: '發佈圖片的格式（JPEG）；無圖片或尚未實際發佈時為空']
+  image_width int [null, note: '發佈圖片的寬度（像素）；無圖片或尚未實際發佈時為空']
+  image_height int [null, note: '發佈圖片的高度（像素）；無圖片或尚未實際發佈時為空']
+  image_variant string [null, note: '實際送出的圖片版本；值為「原圖」「Instagram 版本」之一；無圖片或尚未實際發佈時為空']
+  status string [not null, note: '狀態；值為「待發佈」「成功」「失敗」「已取消」四者之一（需求 4.4）']
+  published_at string [null, note: '發佈時間（日期時間）：發佈成功的時間']
+  platform_post_url string [null, note: '平台貼文連結：發佈成功時，該平台上的貼文網址']
+  auto_retry_count int [not null, default: 0, note: '逾時恢復時因平台確認未發佈而自動重新發佈的次數；上限 1 次']
+  failure_reason string [null, note: '失敗原因：發佈失敗時顯示給使用者的固定中文原因；值為「帳號授權過期」「帳號授權失效」「平台暫時無法連線」「內容不符合平台限制」「發佈逾時」「其他」之一。授權超過有效期限為「帳號授權過期」；平台明確回應 Token 被撤銷或授權無效為「帳號授權失效」；網路錯誤或平台暫時性錯誤不得歸為授權相關原因（需求 4.4、NFR-05）']
+  platform_error_message string [null, note: '平台原始錯誤訊息：發佈失敗時平台回傳的原始訊息，只有管理員可查看，供問題排查；保存前須過濾存取 Token、密鑰等敏感資訊（NFR-02）']
+
+  indexes {
+    (post_id, platform_account_id) [unique, note: '一則貼文的每個目標平台帳號各有一筆發佈紀錄（需求 4.4）']
+    platform_account_id [note: '依平台帳號查詢發佈紀錄（外鍵索引）']
+    (post_id, status) [note: '依貼文與狀態篩選發佈紀錄（發佈、重試與逾時恢復）']
+  }
+
+  Note: '''
+  一則貼文在一個目標平台帳號上的發佈結果（需求 4.4）。
+  關聯：
+  - post 1:N publish_record
+  - platform_account 1:N publish_record
+  - publish_record 1:N publish_record_history
+  生命週期：
+  - 設定排程或立即發佈時，為貼文的每個目標平台帳號建立一筆發佈紀錄，status = 待發佈
+  - 發佈完成後，status 由待發佈更新為成功或失敗
+  - 貼文進入發佈中的時間距今大於或等於 10 分鐘（整則任務的恢復門檻，與單一平台 30 秒逾時門檻分開）仍有待發佈紀錄時，系統執行逾時恢復：能向平台查詢確認已發佈則記為成功；無法確認則記為失敗、原因「發佈逾時」；不重新發佈。系統重新啟動時同樣執行恢復檢查
+  - 逾時恢復時平台明確確認未發佈：系統自動重新發佈該平台帳號，紀錄維持待發佈直到有結果；每筆紀錄最多自動重試 1 次；結果依實際情況記錄（成功、失敗原因），仍無法確認者記為失敗「發佈逾時」；每次自動重試寫入稽核紀錄
+  - 已排程貼文立即發佈時沿用既有待發佈紀錄，不新增；只有待發佈紀錄會被執行，已取消紀錄維持不變
+  - 取消排程時，status 由待發佈改為已取消（不刪除）
+  - 已排程貼文修改目標平台帳號時，只更新受影響的紀錄，並在同一個資料庫交易內完成：
+    - 新增的目標平台帳號：建立一筆待發佈紀錄
+    - 被拿掉的目標平台帳號：其待發佈紀錄改為已取消
+    - 保留的目標平台帳號：發佈紀錄不變
+  - 每次建立與每次 status 變更都寫入一筆 publish_record_history
+  - 平台帳號被移除時，已排程貼文對該平台帳號的待發佈紀錄改為已取消，變更歷程原因為「目標平台帳號已移除」
+  - 排程時間到時，跳過已取消的發佈紀錄，不發佈到該平台帳號
+  - 排程時間到時，授權失效（含授權到期時間已過）的目標平台帳號不發送，其發佈紀錄改為失敗，failure_reason = 帳號授權過期；其餘平台帳號照常發佈
+  - 某平台帳號在此貼文已有已取消紀錄、又再次成為目標時（取消排程後修改目標再重新排程，或已排程貼文拿掉目標後又加回），將同一筆已取消紀錄改回待發佈，不新增紀錄；已不是目標的已取消紀錄維持已取消
+  - 從未設定排程或立即發佈的草稿沒有發佈紀錄
+  跨屬性不變條件：
+  - status = 成功 時，記錄 published_at 與 platform_post_url（需求 4.4）
+  - status = 失敗 時，記錄 failure_reason（需求 4.4、NFR-05）
+  - platform_error_message 不得包含存取憑證（NFR-02）
+  - 重試只針對 status = 失敗 的紀錄；status = 成功 的平台帳號不得重複發佈（BR-16）
+  - 重試只處理平台帳號未被移除且授權有效的失敗紀錄；沒有任何符合條件的紀錄時拒絕重試，貼文狀態不變
+  '''
+}
+
+Table publish_record_history {
+  id long [pk, note: '變更歷程識別碼']
+  publish_record_id long [not null, note: '所屬的發佈紀錄（publish_record.id）']
+  from_status string [null, note: '變更前狀態；值同 publish_record.status；NULL 表示初次建立，沒有前一個狀態']
+  to_status string [not null, note: '變更後狀態；值同 publish_record.status']
+  changed_at string [not null, note: '變更時間（日期時間）']
+  actor_type string [not null, note: '操作者類型；值為「使用者」「系統」之一']
+  actor_id long [null, note: '操作者（user_account.id）；actor_type = 系統 時為空']
+  reason string [not null, note: '變更原因：受控代碼（enum），顯示文字另行管理；值為「設定排程」「立即發佈」「新增目標平台帳號」「修改目標平台帳號」「目標平台帳號已移除」「取消排程」「重新排程」「刪除貼文」「發佈貼文：成功」「發佈貼文：失敗」「重試發佈：開始」「重試發佈：成功」「重試發佈：失敗」「發佈逾時恢復：已確認發佈」「發佈逾時恢復：確認未發佈」「發佈逾時恢復：無法確認」「自動重試發佈：開始」「自動重試發佈：成功」「自動重試發佈：失敗」之一']
+
+  indexes {
+    (publish_record_id, changed_at) [note: '依發佈紀錄與變更時間查詢狀態歷程（外鍵複合索引）']
+  }
+
+  Note: '''
+  發佈紀錄的狀態變更歷程，保留完整追溯能力。
+  publish_record 只保存最新狀態；每次 status 變更新增一筆本表紀錄，不修改、不刪除。
+  關聯：publish_record 1:N publish_record_history；user_account 1:N publish_record_history（可為空）
+  不變條件：
+  - from_status ≠ to_status
+  - 建立發佈紀錄時也寫入一筆：from_status 為 NULL、to_status 為待發佈，原因為觸發操作（設定排程、立即發佈、新增目標平台帳號）
+  - 不可修改或刪除既有歷程
+  - 只有發佈紀錄 status 實際改變（或初次建立）時才新增歷程；單純啟動逾時檢查或重試流程而狀態未變者，記錄於稽核紀錄
+  - actor_type = 使用者 時 actor_id 不為空；actor_type = 系統 時 actor_id 為空
+  '''
+}
+
+Table audit_log {
+  id long [pk, note: '稽核紀錄識別碼']
+  event_seq long [unique, not null, note: '全域事件序號：audit_log、login_security_event、platform_auth_event 共用的全域唯一遞增序號，寫入時取得；合併查詢時間相同時依此由大到小排序']
+  actor_type string [not null, note: '操作者類型；值為「使用者」「系統」之一。排程時間到由系統自動發佈時為「系統」；系統為內部識別用的特殊身分，不是使用者帳號，不能登入或操作']
+  actor_id long [null, note: '操作者：執行操作的使用者（user_account.id）；actor_type = 系統 時為空']
+  action string [not null, note: '操作類型；值為「登入」「登出」「登出所有裝置」「建立幹部帳號」「調整角色」「停用帳號」「啟用帳號」「解除鎖定」「連結平台帳號」「重新連結平台帳號」「移除平台帳號」「發佈貼文」「設定排程」「取消排程」「重試發佈」「自動重試發佈」「複製為新草稿」之一（需求 4.5）']
+  target_type string [not null, note: '操作對象的種類；值為「使用者帳號」「平台帳號」「貼文」之一（需求 4.5：被操作的帳號、平台帳號或貼文）']
+  target_id long [not null, note: '操作對象的識別碼（對應 target_type 所指資料的 id）']
+  occurred_at string [not null, note: '操作時間（日期時間）：操作發生的時間']
+  reason string [null, note: '原因：「自動重試發佈」時記錄觸發原因（例如平台確認未發佈）；其他操作為空']
+  related_post_id long [null, note: '相關貼文：「複製為新草稿」時記錄新草稿的 id（target_id 為來源貼文）；其他操作為空']
+  scheduled_by long [null, note: '排程設定者：系統自動發佈時，記錄當時貼文的排程設定者（user_account.id）；其他情況為空']
+  post_creator_id long [null, note: '貼文建立者：系統自動發佈時，記錄貼文建立者（user_account.id）；其他情況為空']
+  result string [null, note: '執行結果：「發佈貼文」「重試發佈」執行結束後的貼文狀態（PUBLISHED、PARTIALLY_FAILED、FAILED）；其他操作為空']
+
+  Note: '''
+  重要操作的紀錄，供管理員追查（需求 4.5、FR-19）。
+  關聯：
+  - user_account 1:N audit_log（操作者）
+  - audit_log 1:N audit_target_result（「發佈貼文」「重試發佈」當次各目標平台帳號的執行結果）
+  不變條件：
+  - actor_type = 使用者 時 actor_id 不為空；actor_type = 系統 時 actor_id 為空
+  - 每次執行「發佈貼文」或「重試發佈」各新增一筆獨立的稽核紀錄；重試不覆蓋先前紀錄
+  - 使用者手動立即發佈時，actor_type = 使用者，actor_id 為執行操作的使用者
+  不變條件：
+  - 稽核紀錄不可被修改或刪除，保存至少一學年（NFR-08）
+  '''
+}
+
+Table login_security_event {
+  id long [pk, note: '登入安全事件識別碼']
+  event_seq long [unique, not null, note: '全域事件序號：audit_log、login_security_event、platform_auth_event 共用的全域唯一遞增序號，寫入時取得；合併查詢時間相同時依此由大到小排序']
+  event_type string [not null, note: '事件類型；值為「登入失敗」']
+  failure_reason string [not null, note: '登入失敗原因；值為「密碼錯誤」「帳號停用」「帳號鎖定」「帳號不存在」之一；僅供內部追查，對外顯示的登入錯誤訊息一律相同']
+  attempted_email string [not null, note: '嘗試登入的 Email（標準化後）；屬敏感資訊，須妥善保護']
+  user_account_id long [null, note: '對應的使用者帳號（user_account.id）；Email 對應到既有帳號時關聯，帳號不存在時為空']
+  occurred_at string [not null, note: '發生時間（日期時間）']
+
+  Note: '''
+  登入安全事件，與一般稽核紀錄（audit_log）分開存放。
+  一般稽核紀錄的操作者規則不因登入失敗而放寬；登入成功仍寫入 audit_log 的「登入」。
+  管理員查詢稽核紀錄時，未指定操作類型即與 audit_log、platform_auth_event 合併列出（以紀錄種類區分）；依操作者篩選時不列出本表，另以「對應帳號」（user_account_id）篩選。
+  關聯：user_account 1:N login_security_event（可為空）
+  不變條件：
+  - 不得保存密碼（不論正確與否）
+  - 不可修改或刪除，至少保存一學年（比照 NFR-08）
+  - failure_reason = 帳號不存在 時 user_account_id 為空；其餘原因時 user_account_id 不為空
+  '''
+}
+
+Table platform_auth_event {
+  id long [pk, note: '平台授權事件識別碼']
+  event_seq long [unique, not null, note: '全域事件序號：audit_log、login_security_event、platform_auth_event 共用的全域唯一遞增序號，寫入時取得；合併查詢時間相同時依此由大到小排序']
+  event_type string [not null, note: '事件類型；值為「連結平台帳號失敗」「重新連結平台帳號失敗」之一；首次連結與重新連結共用本表，以事件類型區分']
+  platform string [not null, note: '平台；值為「Threads」「Instagram」「Discord」之一']
+  account_name string [null, note: '帳號名稱或 Discord 頻道名稱；已取得則記錄，尚未取得時為空']
+  failure_reason string [not null, note: '失敗原因；值為「平台授權失敗」「Webhook 驗證無效」「暫時無法驗證」「平台帳號識別碼不一致」之一（對應重新連結平台帳號的前置條件）；帳號名稱重複屬資料衝突而非授權問題，不記錄為平台授權事件']
+  platform_account_id long [null, note: '相關的平台帳號（platform_account.id）；重新連結失敗時必填；首次連結失敗時尚無平台帳號，為空']
+  actor_id long [not null, note: '執行連結或重新連結的管理員（user_account.id）']
+  occurred_at string [not null, note: '發生時間（日期時間）']
+
+  Note: '''
+  平台授權相關的安全事件，比照登入安全事件與一般稽核紀錄分開存放。
+  只有管理員可查閱（透過查詢稽核紀錄；未指定操作類型時與其他紀錄合併列出，操作者篩選以 actor_id 比對）。
+  關聯：platform_account 1:N platform_auth_event；user_account 1:N platform_auth_event
+  不變條件：
+  - 不得保存存取憑證、Token 或 Webhook 網址
+  - 不可修改或刪除，至少保存一學年（比照 NFR-08）
+  '''
+}
+
+Table audit_target_result {
+  id long [pk, note: '目標執行結果識別碼']
+  audit_log_id long [not null, note: '所屬的稽核紀錄（audit_log.id），其 action 為「發佈貼文」「重試發佈」或「自動重試發佈」']
+  platform_account_id long [not null, note: '該次執行的目標平台帳號（platform_account.id）']
+  status string [not null, note: '當次執行結果；值為「成功」「失敗」「未重試」之一；「未重試」僅用於「重試發佈」中未實際執行的目標平台帳號']
+  failure_reason string [null, note: '當次失敗原因；值同 publish_record.failure_reason；僅 status = 失敗 時有值']
+  skip_reason string [null, note: '未重試原因；值為「先前已成功」「授權失效而跳過」「已移除而跳過」之一；僅 status = 未重試 時有值']
+
+  indexes {
+    audit_log_id [note: '依稽核紀錄查詢各目標平台帳號執行結果（外鍵索引）']
+    platform_account_id [note: '依平台帳號關聯查詢目標執行結果（外鍵索引）']
+  }
+
+  Note: '''
+  「發佈貼文」「重試發佈」稽核紀錄中，當次每個目標平台帳號的執行結果快照。
+  發佈紀錄（publish_record）表示目前最新狀態；本表保存歷次執行當下的結果，重試時新增、不覆蓋。
+  「重試發佈」列出貼文全部目標平台帳號：實際重試者記錄本次結果與失敗原因；未重試者標示未重試原因。
+  關聯：audit_log 1:N audit_target_result；platform_account 1:N audit_target_result
+  不變條件：與稽核紀錄相同，不可被修改或刪除（NFR-08）
+  '''
+}
+
+Ref: post.creator_id > user_account.id // 多對一：使用者建立多則貼文
+Ref: platform_account.linked_by > user_account.id // 多對一：管理員連結多個平台帳號
+Ref: post_image.post_id - post.id // 一對一（貼文可無圖片）
+Ref: post_target.post_id > post.id // 多對多（post ↔ platform_account）之一端
+Ref: post_target.platform_account_id > platform_account.id // 多對多（post ↔ platform_account）之另一端
+// Ref: publish_record.post_id > post.id // 邏輯歷史參照（無資料庫實體外鍵約束）：一則貼文對應多筆發佈紀錄，但依 BR-13 與 BR-35 刪除 DRAFT／SCHEDULED 貼文時須允許 DELETE FROM post 並保留 publish_record 原 post_id 紀錄（若設實體 Ref／FOREIGN KEY 預設 RESTRICT／NO ACTION 將阻擋刪除貼文）
+Ref: publish_record.platform_account_id > platform_account.id // 多對一：一個平台帳號多筆發佈紀錄
+Ref: audit_log.actor_id > user_account.id // 多對一：使用者有多筆稽核紀錄
+Ref: post.scheduled_by > user_account.id // 多對一：排程設定者
+Ref: audit_log.scheduled_by > user_account.id // 多對一：系統發佈時的排程設定者
+Ref: audit_log.post_creator_id > user_account.id // 多對一：系統發佈時的貼文建立者
+Ref: login_security_event.user_account_id > user_account.id // 多對一（可為空）：登入安全事件關聯的帳號
+Ref: publish_record_history.publish_record_id > publish_record.id // 多對一：一筆發佈紀錄有多筆變更歷程
+Ref: publish_record_history.actor_id > user_account.id // 多對一（可為空）：變更操作者
+Ref: platform_auth_event.platform_account_id > platform_account.id // 多對一：平台帳號的授權事件
+Ref: platform_auth_event.actor_id > user_account.id // 多對一：執行重新連結的管理員
+Ref: audit_target_result.audit_log_id > audit_log.id // 多對一：一筆發佈／重試稽核紀錄有多筆目標執行結果
+Ref: audit_target_result.platform_account_id > platform_account.id // 多對一

@@ -51,6 +51,41 @@ MediAgent 讓社團幹部在同一個地方撰寫一次貼文，選擇要發佈�
 4. 多媒體貼文與 Instagram：支援圖片上傳與圖片貼文，進一步整合 Instagram 發佈功能
 5. 發佈成效統計：彙整各平台貼文的按讚、留言等互動數據，提供成效追蹤與比較
 
-## Documents
+---
 
-- [需求與提案規格](docs/requirements.md)
+## 系統規格文件導讀
+
+本專案之詳細需求規格、系統架構、資料庫模型、API 合約與驗收測試規格已完整定義於 `docs/` 與 `spec/` 目錄中：
+
+| 檔案 | 內容 |
+|---|---|
+| `docs/requirements.md` | 需求規格：角色權限、資料、功能需求（FR）、商業規則（BR）、非功能需求（NFR）、MVP 範圍、待確認事項 |
+| `docs/architecture.md` | 系統架構：部署與開發環境、模組分工（M1～M5、F、D）、發佈引擎、平台串接、安全、測試架構、架構決策紀錄 |
+| `docs/data-model.md` | 資料模型：13 張資料表的完整欄位、英文代碼對照、各表由哪個模組寫入、交易與併發 |
+| `docs/api-design.md` | API 設計：35 個端點、錯誤碼、前後端共同遵守的合約 |
+| `docs/team-rules.md` | 團隊協作規範：模組分工、Sprint 時程、技術棧、Git 流程、命名與分層、測試與完成的定義、繳交、密鑰管理 |
+| `docs/issue-workflow.md` | Issue 撰寫規範與模板：如何把功能拆成可開發的 issue |
+| `spec/erm.dbml` | 業務資料模型（DBML），可貼到 [dbdiagram.io](https://dbdiagram.io) 檢視 ER 圖 |
+| `spec/features/*.feature` | 30 個功能的驗收規格（Gherkin），共 452 個例子，以 pytest-bdd 執行 |
+
+### 建議閱讀順序
+
+1. **所有人**：`docs/requirements.md` 第 1～3 節（問題、角色、情境）→ `docs/team-rules.md`
+2. **後端**：`docs/architecture.md` → `docs/data-model.md` → `docs/api-design.md` → 自己模組負責的 `spec/features/`
+3. **前端**：`docs/api-design.md` → `docs/requirements.md` 第 2.1 節（角色權限）、第 4.7 節（平台限制）
+4. **開 issue 前**：`docs/issue-workflow.md`
+
+### 閱讀慣例
+
+- **編號**：FR-xx、BR-xx、NFR-xx 以 `docs/requirements.md` 為準，其他文件與 issue 一律引用這些編號。
+- **「需求 4.3」**：指 `docs/requirements.md` 第 4.3 節。
+- **文件間引用**：《mediagent 資料模型》＝`docs/data-model.md`、《mediagent API 設計》＝`docs/api-design.md`、《mediagent 系統架構設計》＝`docs/architecture.md`、《mediagent 團隊協作規範》＝`docs/team-rules.md`、《mediagent Issue 撰寫規範》＝`docs/issue-workflow.md`。
+- **`#TODO`**：feature 中尚待外部資料查證的規則（如各平台字數算法、圖片尺寸限制）。
+- **圖表**：架構文件使用 Mermaid，在 GitHub 或安裝 Mermaid 擴充套件的 VS Code 中可直接顯示。
+
+### 尚待決定
+
+- `docs/requirements.md` 第 10 節：異常通知、幹部自行改密碼、PNG 轉檔等 6 項。
+- `docs/api-design.md` 第 5 節：API 層面暫定的處理方式。
+
+規格有疑問或需修改時，請開 `spec-question` issue 討論，決定後再更新文件（見 `docs/team-rules.md`）。
